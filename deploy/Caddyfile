@@ -1,0 +1,21 @@
+# TLS-Zertifikat holt Caddy automatisch von Let's Encrypt für APP_DOMAIN (aus der .env).
+{$APP_DOMAIN} {
+	encode zstd gzip
+	# Erst nach der Antwort der App anwenden, damit doppelte Header ersetzt statt angehängt werden
+	header {
+		defer
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		Permissions-Policy "camera=(), microphone=(), geolocation=()"
+		-Server
+	}
+	# Nur der Health-Check ist von Actuator öffentlich; alles andere bleibt intern
+	@actuator {
+		path /actuator/*
+		not path /actuator/health
+	}
+	respond @actuator 404
+	reverse_proxy app:8080
+}

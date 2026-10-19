@@ -1,0 +1,15 @@
+<header class="topbar">
+  <h1>Test-Projekt</h1>
+  @if (auth.user(); as user) {
+    <div class="session">
+      <span>{{ user }}</span>
+      <button type="button" class="secondary" (click)="logout()">Abmelden</button>
+    </div>
+  }
+</header>
+
+<main>
+  <router-outlet />
+</main>
+
+<footer>Angular · Spring Boot · Postgres · hexagonal</footer>

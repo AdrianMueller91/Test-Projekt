@@ -1,0 +1,22 @@
+# Betrieb auf dem Server hinter Caddy. Die Werte kommen aus deploy/compose.yaml und der .env.
+spring:
+  datasource:
+    # Kein Standardwert: fehlt die Angabe, startet die Anwendung nicht (statt still mit H2 zu laufen)
+    url: ${DB_URL}
+    username: ${DB_USERNAME}
+    password: ${DB_PASSWORD}
+    hikari:
+      maximum-pool-size: 5
+
+server:
+  # Caddy beendet TLS und setzt X-Forwarded-For/-Proto; Tomcat übernimmt Client-IP und https daraus
+  forward-headers-strategy: native
+  shutdown: graceful
+  servlet:
+    session:
+      cookie:
+        secure: true
+
+app:
+  security:
+    require-password: true

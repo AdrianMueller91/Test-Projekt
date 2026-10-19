@@ -1,0 +1,76 @@
+# Betrieb auf dem Server. Liegt dort unter /opt/test-projekt zusammen mit .env und Caddyfile.
+# Die Pipeline lädt das Image hoch und startet mit "docker compose up -d".
+name: test-projekt
+
+services:
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      APP_DOMAIN: ${APP_DOMAIN:?APP_DOMAIN fehlt in der .env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks: [web]
+    depends_on:
+      - app
+
+  app:
+    image: test-projekt:current
+    restart: unless-stopped
+    environment:
+      DB_URL: jdbc:postgresql://db:5432/testprojekt
+      DB_USERNAME: testprojekt
+      DB_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD fehlt in der .env}
+      APP_USERNAME: ${APP_USERNAME:-adrian}
+      APP_PASSWORD: ${APP_PASSWORD:?APP_PASSWORD fehlt in der .env}
+    # Dateisystem schreibgeschützt; Tomcat braucht nur /tmp
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    networks: [web, backend]
+    depends_on:
+      db:
+        condition: service_healthy
+    mem_limit: 700m
+
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: testprojekt
+      POSTGRES_USER: testprojekt
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      TZ: Europe/Berlin
+    # Kleine Speicherwerte, reichen für den Test und lassen RAM für die JVM
+    command: ["postgres", "-c", "shared_buffers=64MB", "-c", "max_connections=20"]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    security_opt:
+      - no-new-privileges:true
+    # Nur im internen Netz: keine veröffentlichten Ports, kein Internetzugang
+    networks: [backend]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U testprojekt -d testprojekt"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    mem_limit: 300m
+
+networks:
+  web:
+  backend:
+    internal: true
+
+volumes:
+  pgdata:
+  caddy_data:
+  caddy_config:

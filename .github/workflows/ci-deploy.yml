@@ -1,0 +1,121 @@
+# Tests bei jedem Push und Pull Request. Auf main zusätzlich: Image bauen, auf den Server übertragen,
+# starten und per Health-Check prüfen. Schlägt der Check fehl, setzt der Server auf das vorherige Image zurück.
+#
+# Benötigt (Settings -> Secrets and variables -> Actions):
+#   Secret   VPS_HOST         IP des Servers
+#   Secret   VPS_SSH_KEY      privater Schlüssel des Benutzers "deploy" (von bootstrap-server.sh)
+#   Secret   VPS_KNOWN_HOSTS  Host-Schlüssel des Servers (ssh-keyscan), schützt vor untergeschobenen Servern
+#   Variable APP_DOMAIN       z. B. demo.fitness-mueller.de
+# Fehlt APP_DOMAIN, läuft nur der Test-Teil.
+name: CI und Deployment
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: testprojekt
+          POSTGRES_USER: testprojekt
+          POSTGRES_PASSWORD: ci
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U testprojekt" --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Frontend testen und bauen
+        working-directory: frontend
+        run: |
+          npm ci --no-audit --no-fund
+          npx ng test --watch=false
+          npx ng build
+
+      - name: Backend-Tests gegen Postgres
+        working-directory: backend
+        env:
+          SPRING_DATASOURCE_URL: jdbc:postgresql://localhost:5432/testprojekt
+          SPRING_DATASOURCE_USERNAME: testprojekt
+          SPRING_DATASOURCE_PASSWORD: ci
+        run: ./mvnw -B -q verify
+
+  deploy:
+    needs: test
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && vars.APP_DOMAIN != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment:
+      name: production
+      url: https://${{ vars.APP_DOMAIN }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Image bauen
+        run: docker build -t "test-projekt:${GITHUB_SHA}" .
+
+      - name: SSH vorbereiten
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+        run: |
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "$VPS_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          cat >> ~/.ssh/config <<EOF
+          Host vps
+            HostName $VPS_HOST
+            User deploy
+            IdentityFile ~/.ssh/deploy_key
+            StrictHostKeyChecking yes
+            ServerAliveInterval 30
+          EOF
+
+      - name: Image und Konfiguration übertragen
+        run: |
+          docker save "test-projekt:${GITHUB_SHA}" | gzip -1 > image.tar.gz
+          ls -lh image.tar.gz
+          scp -q image.tar.gz deploy/compose.yaml deploy/Caddyfile deploy/remote-deploy.sh vps:/opt/test-projekt/
+
+      - name: Starten mit Health-Check und automatischem Rückweg
+        run: ssh vps "bash /opt/test-projekt/remote-deploy.sh ${GITHUB_SHA}"
+
+      - name: Von außen prüfen
+        env:
+          APP_DOMAIN: ${{ vars.APP_DOMAIN }}
+        run: |
+          # Beim ersten Start holt Caddy noch das Zertifikat, daher bis zu 2 Minuten warten
+          for i in $(seq 1 20); do
+            if curl -fsS "https://${APP_DOMAIN}/actuator/health" | grep -q '"UP"'; then
+              echo "https://${APP_DOMAIN} ist erreichbar"; exit 0
+            fi
+            sleep 6
+          done
+          echo "Health-Check über HTTPS fehlgeschlagen"; exit 1
